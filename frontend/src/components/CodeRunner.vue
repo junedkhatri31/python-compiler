@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { CodeEditor } from 'monaco-editor-vue3'
 
 const defaultSnippet = `# Welcome to the Python runner
@@ -14,6 +14,10 @@ const output = ref('')
 const isRunning = ref(false)
 const socketRef = ref(null)
 const statusMessage = ref('Click “Run” to execute your code.')
+const isAwaitingInput = ref(false)
+const currentInput = ref('')
+const outputPanelRef = ref(null)
+const stdinCaptureRef = ref(null)
 
 const wsEndpoint = import.meta.env.VITE_BACKEND_WS_URL ?? 'ws://127.0.0.1:8000/ws/run'
 
@@ -26,8 +30,30 @@ const editorOptions = {
 }
 
 const runLabel = computed(() => (isRunning.value ? 'Running…' : 'Run Code'))
+const displayedOutput = computed(() => (output.value ? output.value : '— no output yet —'))
+
+const focusStdinCapture = () => {
+  nextTick(() => {
+    stdinCaptureRef.value?.focus()
+  })
+}
+
+const scrollOutputToBottom = () => {
+  nextTick(() => {
+    const node = outputPanelRef.value
+    if (node) {
+      node.scrollTop = node.scrollHeight
+    }
+  })
+}
+
+const resetInputState = () => {
+  isAwaitingInput.value = false
+  currentInput.value = ''
+}
 
 const teardownSocket = (reason) => {
+  resetInputState()
   if (!socketRef.value) return
 
   const state = socketRef.value.readyState
@@ -36,6 +62,109 @@ const teardownSocket = (reason) => {
   }
   socketRef.value = null
 }
+
+const appendOutput = (text) => {
+  if (!text) return
+  output.value += text
+  scrollOutputToBottom()
+}
+
+const sendStdinPayload = (value) => {
+  const socket = socketRef.value
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return false
+  }
+  socket.send(JSON.stringify({ type: 'stdin', data: value }))
+  return true
+}
+
+const submitCurrentInput = () => {
+  const payload = currentInput.value
+  const dataToSend = payload.endsWith('\n') ? payload : `${payload}\n`
+  const sent = sendStdinPayload(dataToSend)
+  if (sent) {
+    appendOutput(payload ? `${payload}\n` : '\n')
+    statusMessage.value = 'Input sent. Awaiting program output…'
+  }
+  resetInputState()
+}
+
+const sendEofToContainer = () => {
+  const socket = socketRef.value
+  if (!socket || socket.readyState !== WebSocket.OPEN) return
+  socket.send(JSON.stringify({ type: 'stdin_close' }))
+  appendOutput('^D\n')
+  statusMessage.value = 'Sent EOF to stdin.'
+  resetInputState()
+}
+
+const handleStdinKeydown = (event) => {
+  if (!isAwaitingInput.value) {
+    return
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+    event.preventDefault()
+    sendEofToContainer()
+    return
+  }
+
+  if (event.key === 'Enter') {
+    if (event.shiftKey) {
+      event.preventDefault()
+      currentInput.value += '\n'
+      return
+    }
+    event.preventDefault()
+    submitCurrentInput()
+    return
+  }
+
+  if (event.key === 'Backspace') {
+    event.preventDefault()
+    if (currentInput.value.length > 0) {
+      currentInput.value = currentInput.value.slice(0, -1)
+    }
+    return
+  }
+
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    currentInput.value += '\t'
+    return
+  }
+
+  if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault()
+    currentInput.value += event.key
+  }
+}
+
+const handleCaptureBlur = () => {
+  if (isAwaitingInput.value) {
+    focusStdinCapture()
+  }
+}
+
+const handleOutputClick = () => {
+  if (isAwaitingInput.value) {
+    focusStdinCapture()
+  }
+}
+
+watch(output, scrollOutputToBottom)
+watch(currentInput, () => {
+  if (isAwaitingInput.value) {
+    scrollOutputToBottom()
+  }
+})
+watch(isAwaitingInput, (value) => {
+  if (value) {
+    focusStdinCapture()
+  } else if (stdinCaptureRef.value) {
+    stdinCaptureRef.value.blur()
+  }
+})
 
 const runCode = () => {
   if (isRunning.value) return
@@ -49,6 +178,7 @@ const runCode = () => {
   isRunning.value = true
   output.value = ''
   statusMessage.value = 'Connecting to execution backend…'
+  resetInputState()
 
   if (socketRef.value) {
     teardownSocket('switching to a new run')
@@ -70,11 +200,18 @@ const runCode = () => {
     try {
       const payload = JSON.parse(event.data)
       if (typeof payload.stdout === 'string' && payload.stdout.length > 0) {
-        output.value += payload.stdout.replace(/\r\n/g, '\n')
+        appendOutput(payload.stdout.replace(/\r\n/g, '\n'))
       }
       if (typeof payload.stderr === 'string' && payload.stderr.length > 0) {
         const prefix = output.value.endsWith('\n') || output.value.length === 0 ? '' : '\n'
-        output.value += `${prefix}[stderr] ${payload.stderr.replace(/\r\n/g, '\n')}`
+        appendOutput(`${prefix}[stderr] ${payload.stderr.replace(/\r\n/g, '\n')}`)
+      }
+      if (payload.stdin_requested) {
+        currentInput.value = ''
+        isAwaitingInput.value = true
+        statusMessage.value =
+          'Program awaiting input… type and press Enter (Shift+Enter for newline, Ctrl+D for EOF).'
+        focusStdinCapture()
       }
       if (typeof payload.message === 'string') {
         statusMessage.value = payload.message
@@ -86,7 +223,7 @@ const runCode = () => {
         statusMessage.value = `Execution finished with exit code ${payload.exit_code}.`
       }
     } catch {
-      output.value += event.data
+      appendOutput(String(event.data))
     }
   }
 
@@ -95,11 +232,12 @@ const runCode = () => {
   }
 
   socket.onclose = () => {
+    isRunning.value = false
+    socketRef.value = null
+    resetInputState()
     if (!output.value) {
       output.value = 'Execution finished.'
     }
-    isRunning.value = false
-    socketRef.value = null
     if (!/Execution finished|ERROR|TIMEOUT|⚠️/.test(statusMessage.value)) {
       statusMessage.value = 'Connection to execution backend closed.'
     }
@@ -159,8 +297,29 @@ onBeforeUnmount(() => {
             </p>
           </div>
         </div>
-        <div class="flex-1 overflow-y-auto bg-slate-950 px-4 py-3 font-mono text-sm text-slate-200 max-h-[60vh] md:max-h-[75vh]">
-          <pre class="whitespace-pre-wrap leading-relaxed">{{ output || '— no output yet —' }}</pre>
+        <div
+          ref="outputPanelRef"
+          class="relative flex-1 overflow-y-auto bg-slate-950 px-4 py-3 font-mono text-sm text-slate-200 max-h-[60vh] md:max-h-[75vh]"
+          @click="handleOutputClick"
+        >
+          <pre class="whitespace-pre-wrap leading-relaxed">{{ displayedOutput }}</pre>
+          <div
+            v-if="isAwaitingInput"
+            class="mt-2 flex items-center gap-2 font-mono text-emerald-400"
+          >
+            <span>&gt;</span>
+            <span class="relative flex-1 whitespace-pre-wrap">
+              {{ currentInput || '\u00A0' }}
+              <span class="ml-1 inline-block h-4 w-[0.4rem] bg-emerald-400 animate-pulse align-middle"></span>
+            </span>
+          </div>
+          <textarea
+            ref="stdinCaptureRef"
+            class="absolute bottom-0 left-0 h-[1px] w-[1px] opacity-0"
+            tabindex="-1"
+            @keydown="handleStdinKeydown"
+            @blur="handleCaptureBlur"
+          ></textarea>
         </div>
       </section>
     </main>
