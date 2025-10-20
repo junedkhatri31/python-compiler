@@ -137,7 +137,7 @@ def _create_container(client: docker.DockerClient, script_name: str) -> docker.m
         stdin_open=True,
         tty=False,
         network_disabled=True,
-        mem_limit="256m",
+        mem_limit="64m",
         working_dir="/tmp",
     )
 
