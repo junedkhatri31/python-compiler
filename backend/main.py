@@ -215,6 +215,7 @@ async def _consume_client_messages(
     websocket: WebSocket,
     sock,
     lock: asyncio.Lock,
+    container: docker.models.containers.Container,
 ) -> None:
     if lock is None:
         lock = asyncio.Lock()
@@ -224,6 +225,17 @@ async def _consume_client_messages(
         if msg_type == "stdin":
             await _write_to_stdin(sock, lock, message.get("data", ""))
         elif msg_type == "stdin_close":
+            await asyncio.to_thread(_close_stdin_socket, sock)
+            break
+        elif msg_type == "stop":
+            await websocket.send_json(
+                {
+                    "message": "Termination requested by client. Stopping container…",
+                    "status": "stopping",
+                }
+            )
+            with suppress(APIError, DockerException):
+                await asyncio.to_thread(container.kill)
             await asyncio.to_thread(_close_stdin_socket, sock)
             break
 
@@ -317,7 +329,7 @@ async def run_python(websocket: WebSocket):
         await websocket.send_json({"message": "Container started. Streaming output…" })
 
         if stdin_socket is not None and stdin_lock is not None:
-            stdin_task = asyncio.create_task(_consume_client_messages(websocket, stdin_socket, stdin_lock))
+            stdin_task = asyncio.create_task(_consume_client_messages(websocket, stdin_socket, stdin_lock, container))
 
             if isinstance(initial_stdin, str) and initial_stdin:
                 initial_payload = initial_stdin if initial_stdin.endswith("\n") else f"{initial_stdin}\n"

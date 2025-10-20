@@ -18,6 +18,7 @@ const isAwaitingInput = ref(false)
 const currentInput = ref('')
 const outputPanelRef = ref(null)
 const stdinCaptureRef = ref(null)
+const isStopping = ref(false)
 
 const wsEndpoint = import.meta.env.VITE_BACKEND_WS_URL ?? 'ws://127.0.0.1:8000/ws/run'
 
@@ -54,6 +55,7 @@ const resetInputState = () => {
 
 const teardownSocket = (reason) => {
   resetInputState()
+  isStopping.value = false
   if (!socketRef.value) return
 
   const state = socketRef.value.readyState
@@ -71,7 +73,7 @@ const appendOutput = (text) => {
 
 const sendStdinPayload = (value) => {
   const socket = socketRef.value
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
+  if (!socket || socket.readyState !== WebSocket.OPEN || isStopping.value) {
     return false
   }
   socket.send(JSON.stringify({ type: 'stdin', data: value }))
@@ -91,11 +93,21 @@ const submitCurrentInput = () => {
 
 const sendEofToContainer = () => {
   const socket = socketRef.value
-  if (!socket || socket.readyState !== WebSocket.OPEN) return
+  if (!socket || socket.readyState !== WebSocket.OPEN || isStopping.value) return
   socket.send(JSON.stringify({ type: 'stdin_close' }))
   appendOutput('^D\n')
   statusMessage.value = 'Sent EOF to stdin.'
   resetInputState()
+}
+
+const requestStop = () => {
+  const socket = socketRef.value
+  if (!socket || socket.readyState !== WebSocket.OPEN || isStopping.value) return
+
+  socket.send(JSON.stringify({ type: 'stop' }))
+  isStopping.value = true
+  resetInputState()
+  statusMessage.value = 'Termination requested… waiting for container to stop.'
 }
 
 const handleStdinKeydown = (event) => {
@@ -179,6 +191,7 @@ const runCode = () => {
   output.value = ''
   statusMessage.value = 'Connecting to execution backend…'
   resetInputState()
+  isStopping.value = false
 
   if (socketRef.value) {
     teardownSocket('switching to a new run')
@@ -221,6 +234,7 @@ const runCode = () => {
       }
       if (typeof payload.exit_code === 'number') {
         statusMessage.value = `Execution finished with exit code ${payload.exit_code}.`
+        isStopping.value = false
       }
     } catch {
       appendOutput(String(event.data))
@@ -235,6 +249,7 @@ const runCode = () => {
     isRunning.value = false
     socketRef.value = null
     resetInputState()
+    isStopping.value = false
     if (!output.value) {
       output.value = 'Execution finished.'
     }
@@ -258,15 +273,26 @@ onBeforeUnmount(() => {
           Write Python on the left. Your output will appear on the right as soon as execution lands.
         </p>
       </div>
-      <button
-        type="button"
-        class="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-emerald-500/90 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-80 disabled:hover:bg-emerald-500/90"
-        :disabled="isRunning"
-        @click="runCode"
-      >
-        <span class="text-lg leading-none">▶</span>
-        <span>{{ runLabel }}</span>
-      </button>
+      <div class="flex items-center gap-3">
+        <button
+          type="button"
+          class="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-emerald-500/90 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-emerald-500/90"
+          :disabled="isRunning || isStopping"
+          @click="runCode"
+        >
+          <span class="text-lg leading-none">▶</span>
+          <span>{{ runLabel }}</span>
+        </button>
+        <button
+          type="button"
+          class="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-rose-500/90 px-4 py-2 text-sm font-medium text-slate-50 transition hover:bg-rose-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!isRunning || isStopping"
+          @click="requestStop"
+        >
+          <span class="text-lg leading-none">■</span>
+          <span>Stop</span>
+        </button>
+      </div>
     </header>
 
     <main class="flex flex-1 flex-col gap-6 p-6 md:grid md:grid-cols-2">
