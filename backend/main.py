@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import socket
 import tarfile
 import textwrap
@@ -75,10 +76,14 @@ RUNNER_SCRIPT = textwrap.dedent(
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+raw_origins = os.getenv("ALLOWED_CORS_ORIGINS")
+if raw_origins:
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+else:
+    origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
 app.add_middleware(
     CORSMiddleware,
