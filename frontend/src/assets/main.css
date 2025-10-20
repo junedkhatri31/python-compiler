@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@config "../../tailwind.config.js";
+@import "./base.css";
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+
+  #app {
+    @apply min-h-screen;
+  }
+}
